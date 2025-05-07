@@ -1,0 +1,810 @@
+---
+title: "STA6933Final"
+author: "Reverny Hsu, Noah Miller, Alexandra Perez"
+date: "2025-04-21"
+output: html_document
+---
+
+### Data Cleaning
+
+```{r}
+# Two separate data sets are available and are combined to have one larger dataset
+d1 <- read.table("C:/Users/noahm/OneDrive/Documents/R/STA 6933/Final Project/CF_PCBA-686978.txt", sep="\t", header=T)
+d2 <- read.table("C:/Users/noahm/OneDrive/Documents/R/STA 6933/Final Project/PCBA-686978.txt", sep="\t", header=T)
+```
+
+```{r}
+# Combine two tables
+data <- rbind(d1, d2)
+```
+
+```{r}
+summary(data)
+```
+
+```{r}
+# remove missing values
+data <- na.omit(data)
+
+# remove duplicated
+library(dplyr)
+
+data <- data %>%
+  distinct()
+```
+
+```{r}
+str(data)
+table(data$Label)
+```
+
+The label variable is imbalance.
+
+### EDA
+
+```{r}
+library(ggplot2)
+library(corrplot)
+library(reshape2)
+library(GGally)
+
+#Bar plot to show distribution of 'Label'
+ggplot(data, aes(x = as.factor(Label))) +
+  geom_bar(fill = "orange") +
+  labs(x = "Label", y = "Count", title = "Class Distribution")
+
+
+#Get numeric columns
+numeric_cols <- names(data)[sapply(data, is.numeric)]
+numeric_cols <- setdiff(numeric_cols, "Label")
+
+#Histograms
+par(mfrow = c(2, 3))
+for (col in numeric_cols) {
+  hist(data[[col]], main = col, xlab = col)
+}
+
+# Boxplots grouped by 'Label'
+par(mfrow = c(2, 3))
+for (col in numeric_cols) {
+  boxplot(data[[col]], main = col)}
+  
+#T-test   
+for (col in numeric_cols) {
+  cat(col, "\n")
+  print(t.test(data[[col]] ~ data$Label))
+}
+
+#Density Plots
+for (col in numeric_cols) {
+  p <- ggplot(data, aes_string(x = col, fill = "as.factor(Label)")) + 
+    geom_density(alpha = 0.5) +
+    ggtitle(paste("Density Plot of", col)) +
+    theme_minimal()
+  
+  print(p)
+}
+
+#Correlation Graphs
+
+plot_cols <- c(numeric_cols, "Label")
+
+chunk_size <- 4
+chunks <- split(plot_cols[plot_cols != "Label"], ceiling(seq_along(plot_cols[plot_cols != "Label"]) / chunk_size))
+
+for (i in seq_along(chunks)) {
+  chunk <- chunks[[i]]
+  cols_to_plot <- c(chunk, "Label")
+  
+  p <- ggpairs(data[, cols_to_plot], aes(color = as.factor(Label)))
+  print(p)
+}
+
+# Correlation plots
+par(mfrow = c(1, 1))
+corrplot(cor(data[, plot_cols]), method = "number", type = "upper")
+```
+
+### Scaling/Normalization & Handle imbalanced Data
+
+```{r}
+library(readr)
+
+y <- data$Label
+
+# Extract only numeric predictors (excluding Label)
+x_scaled <- data[, sapply(data, is.numeric)]
+x_scaled <- x_scaled[, setdiff(names(x_scaled), "Label")]
+
+# Normalize
+x_scaled <- as.data.frame(scale(x_scaled))
+```
+
+```{r}
+library(smotefamily)
+# Apply adas with desired parameters
+adas <-ADAS(x_scaled, y, K = 5)
+```
+
+We ended up using ADAS to control imbalance data instead of using SMOTE, since:
+
+- the mild class imbalance
+
+- SMOTE doesn’t generate samples (especially with dup_size < 1)
+
+ADAS is Better with mild imbalance, it works even without large oversampling.
+
+```{r}
+balanced_data <- adas$data
+
+table(balanced_data$class)
+```
+
+The data is balance now ("0": 531; "1":528)
+
+
+```{r}
+# This splits the data into training and testing data sets.
+set.seed(123)
+train = sample(nrow(balanced_data), 0.7*nrow(balanced_data))
+pfas.train = balanced_data[train,]
+pfas.test = balanced_data[-train,]
+```
+
+
+# Logistic regression
+```{r}
+pfas.train$class <- as.numeric(pfas.train$class) 
+pfas.test$class <- as.numeric(pfas.test$class) 
+
+# Logistic Regression Model
+lg_model <- glm(class ~ ., data = pfas.train, family = binomial)
+summary(lg_model)
+```
+
+```{r}
+# Make predictions on the test data
+pred <- predict(lg_model, pfas.test, type = "response")
+
+# Convert predictions to binary outcomes (0 or 1) based on a threshold of 0.5
+pred_binary<- ifelse(pred > 0.5, 1, 0)
+```
+
+```{r}
+# performance metrics
+library(pROC)
+library(caret)
+
+confusion_matrix <- table(pfas.test$class, pred_binary)
+
+# F1-score calculation
+precision <- confusion_matrix[2, 2] / sum(confusion_matrix[2, ])
+recall <- confusion_matrix[2, 2] / sum(confusion_matrix[, 2])
+f1_score <- 2 * (precision * recall) / (precision + recall)
+print(paste("F1-score: ", f1_score))
+
+# MCC (Matthews Correlation Coefficient) calculation
+TP <- confusion_matrix[2, 2]
+TN <- confusion_matrix[1, 1]
+FP <- confusion_matrix[1, 2]
+FN <- confusion_matrix[2, 1]
+mcc <- (TP * TN - FP * FN) / sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
+print(paste("MCC: ", mcc))
+```
+
+```{r}
+# AUC-ROC calculation
+roc_curve <- roc(pfas.test$class, pred) 
+
+# Plot ROC curve
+plot(roc_curve, col = "blue", main = "ROC Curve - Logistic Regression")
+
+# Calculate AUC-ROC
+auc_value <- auc(roc_curve)
+print(paste("AUC-ROC: ", auc_value))
+```
+
+```{r}
+# Logistic Regression Model w/ only significant predictors
+lg_model2 <- glm(class ~ Estimateddensity + Overallaveragevalue + Positiveaveragevalue + Molecularpolarityindex, data = pfas.train, family = binomial)
+summary(lg_model2)
+```
+
+```{r}
+# Make predictions on the test data
+pred <- predict(lg_model2, pfas.test, type = "response")
+
+# Convert predictions to binary outcomes (0 or 1) based on a threshold of 0.5
+pred_binary<- ifelse(pred > 0.5, 1, 0)
+```
+
+```{r}
+# performance metrics
+library(pROC)
+library(caret)
+
+confusion_matrix <- table(pfas.test$class, pred_binary)
+
+# F1-score calculation
+precision <- confusion_matrix[2, 2] / sum(confusion_matrix[2, ])
+recall <- confusion_matrix[2, 2] / sum(confusion_matrix[, 2])
+f1_score <- 2 * (precision * recall) / (precision + recall)
+print(paste("F1-score: ", f1_score))
+
+# MCC (Matthews Correlation Coefficient) calculation
+TP <- confusion_matrix[2, 2]
+TN <- confusion_matrix[1, 1]
+FP <- confusion_matrix[1, 2]
+FN <- confusion_matrix[2, 1]
+mcc <- (TP * TN - FP * FN) / sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
+print(paste("MCC: ", mcc))
+```
+
+```{r}
+# AUC-ROC calculation
+roc_curve <- roc(pfas.test$class, pred) 
+
+# Plot ROC curve
+plot(roc_curve, col = "blue", main = "ROC Curve - Logistic Regression")
+
+# Calculate AUC-ROC
+auc_value <- auc(roc_curve)
+print(paste("AUC-ROC: ", auc_value))
+```
+
+
+
+
+```{r}
+# Logistic Regression Model w/ polynomial
+lg_model3 <- glm(class ~ Volume + Estimateddensity + Minimal+ poly(Positivevariance,2) + Overallaveragevalue+ Positiveaveragevalue+ Balanceofcharges + poly(Maximal,2) + poly(Overallvariance,2) + Product + Molecularpolarityindex, data = pfas.train, family = binomial)
+summary(lg_model3)
+```
+
+```{r}
+# Make predictions on the test data
+lg_preds <- predict(lg_model3, pfas.test, type = "response")
+
+# Convert predictions to binary outcomes (0 or 1) based on a threshold of 0.5
+pred_binary<- ifelse(pred > 0.5, 1, 0)
+```
+```{r}
+# AUC-ROC calculation
+roc_curve_lg  <- roc(pfas.test$class, lg_preds) 
+
+# Plot ROC curve
+plot(roc_curve_lg, col = "blue", main = "ROC Curve - Logistic Regression")
+
+# Calculate AUC-ROC
+auc_value_lg  <- auc(roc_curve_lg)
+print(paste("AUC-ROC: ", auc_value_lg))
+```
+
+```{r}
+confusion_matrix <- table(pfas.test$class, pred_binary)
+
+# F1-score calculation
+precision <- confusion_matrix[2, 2] / sum(confusion_matrix[2, ])
+recall <- confusion_matrix[2, 2] / sum(confusion_matrix[, 2])
+f1_score <- 2 * (precision * recall) / (precision + recall)
+print(paste("F1-score: ", f1_score))
+
+# MCC (Matthews Correlation Coefficient) calculation
+TP <- confusion_matrix[2, 2]
+TN <- confusion_matrix[1, 1]
+FP <- confusion_matrix[1, 2]
+FN <- confusion_matrix[2, 1]
+mcc <- (TP * TN - FP * FN) / sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
+print(paste("MCC: ", mcc))
+```
+The AUC-ROC value for this logistic regression model is the highest of the models, which makes it the best one to use.
+
+
+# Forward Stepwise Selection
+```{r}
+library(leaps)
+pfas.forward <- regsubsets(class ~ ., data = pfas.train, nvmax = 18, method = "forward")
+pfas_sum <- summary(pfas.forward)
+```
+```{r}
+# These plots find the number of predictors that are best to use.
+par(mfrow=c(2,2))
+plot(pfas_sum$rsq ,xlab="Number of Variables ",ylab="RSq", type='l')
+index = which.min(pfas_sum$rsq) # 1 predictors
+points(index,pfas_sum$rsq[index],col="red",cex=2,pch=20)
+
+plot(pfas_sum$bic ,xlab="Number of Variables ",ylab="BIC",type='l')
+index = which.min(pfas_sum$bic) # 4 predictors
+points(index,pfas_sum$bic[index],col="red",cex=2,pch=20)
+
+plot(pfas_sum$adjr2 ,xlab="Number of Variables ", ylab="Adjusted RSq",type="l")
+index = which.max(pfas_sum$adjr2) # 9 predictors
+points(index,pfas_sum$adjr2[index], col="red",cex=2,pch=20)
+```
+```{r}
+coef(pfas.forward, 4)
+```
+
+# XGBoost
+```{r}
+library(xgboost)
+dtrain <- xgb.DMatrix(data = as.matrix(sapply(pfas.train[, -ncol(pfas.train)], as.numeric)), label = as.numeric(pfas.train$class))
+xg.pfas <- xgboost(data = dtrain, nrounds = 100, objective = "binary:logistic")
+xg.pfas.imp <- xgb.importance(model = xg.pfas)
+xgb.plot.importance(xg.pfas.imp, rel_to_first = TRUE, xlab = "Relative importance")
+```
+
+```{r}
+# XGBoost w/ hyperparameter n_estimators=200, learning_rate=0.1, max_depth=20
+set.seed(42)
+library(caret)      # For F1 and MCC calculation
+library(pROC)       # For ROC AUC calculation
+
+# Prepare the data
+dtrain <- xgb.DMatrix(data = as.matrix(sapply(pfas.train[, -ncol(pfas.train)], as.numeric)), 
+                      label = as.numeric(pfas.train$class))
+dtest <- xgb.DMatrix(data = as.matrix(sapply(pfas.test[, -ncol(pfas.test)], as.numeric)), 
+                     label = as.numeric(pfas.test$class))
+
+# Define parameters for XGBoost model
+params <- list(
+  objective = "binary:logistic",   # binary classification problem
+  eta = 0.01,                       # learning rate
+  max_depth = 25,                   # maximum depth of trees
+  colsample_bytree = 0.7,
+  gamma=0,
+  min_child_weight = 1,
+  nthread = 2,                      # number of threads to use
+  eval_metric = "error"             # evaluation metric
+)
+
+# Train the model
+xg.pfas2 <- xgboost(params = params, 
+                   data = dtrain, 
+                   nrounds = 300,  # number of boosting rounds
+                   verbose = 1)
+
+# Make predictions on the test set (probabilities)
+xg_preds2 <- predict(xg.pfas2, dtest)
+
+# Convert probabilities to binary outcomes using a threshold of 0.5
+pred_binary <- ifelse(xg_preds2 > 0.5, 1, 0)
+
+# Calculate confusion matrix
+conf_matrix <- table(pfas.test$class, pred_binary)
+
+# F1-score Calculation
+precision <- conf_matrix[2, 2] / sum(conf_matrix[2, ])
+recall <- conf_matrix[2, 2] / sum(conf_matrix[, 2])
+f1_score <- 2 * (precision * recall) / (precision + recall)
+print(paste("F1-score: ", f1_score))
+
+# MCC (Matthews Correlation Coefficient) Calculation
+TP <- conf_matrix[2, 2]
+TN <- conf_matrix[1, 1]
+FP <- conf_matrix[1, 2]
+FN <- conf_matrix[2, 1]
+mcc <- (TP * TN - FP * FN) / sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
+print(paste("MCC: ", mcc))
+
+# ROC AUC Calculation
+roc_curve_boost2 <- roc(pfas.test$class, xg_preds2)  # Use predicted probabilities for ROC
+auc_value_boost2 <- auc(roc_curve_boost2)
+print(paste("ROC AUC: ", auc_value_boost2))
+
+# Plot ROC curve
+#plot(roc_curve, col = "blue", main = "ROC Curve - XGBoost")
+#text(x = 0.6, y = 0.4, labels = paste("AUC = ", round(auc_value, 3)), col = "red", cex = 1.2)
+```
+
+# Random Forest
+```{r}
+library(randomForest)
+pfas.forest <- randomForest(as.factor(class) ~ ., data = pfas.train, importance = TRUE, ntree = 5000)
+varImpPlot(pfas.forest)
+```
+
+# Random Forest w/ tuning hyperparameters
+```{r}
+library(MLmetrics)
+# Train the random forest model with the specified parameters
+library(randomForest)
+library(pROC)
+set.seed(42)
+# Train the random forest model
+pfas.forest2 <- randomForest(
+  as.factor(pfas.train$class) ~ ., 
+  data = pfas.train, 
+  importance = TRUE, 
+  ntree = 200,             # Number of trees in the forest
+  max_depth = 20,          # Limiting max depth (control tree depth)
+  min_samples_leaf = 5,
+  min_samples_split = 1,
+  nodesize = 5,            # Minimum size of nodes
+  mtry = sqrt(ncol(pfas.train) - 1)  # Default mtry, can be tuned
+)
+
+# Make predictions on the test set
+pred_binary <- predict(pfas.forest2, pfas.test)
+
+# Confusion matrix for calculating F1 and MCC
+conf_matrix <- table(pfas.test$class, pred_binary)
+
+# F1-score Calculation
+precision <- conf_matrix[2, 2] / sum(conf_matrix[2, ])
+recall <- conf_matrix[2, 2] / sum(conf_matrix[, 2])
+f1_score <- 2 * (precision * recall) / (precision + recall)
+print(paste("F1-score: ", f1_score))
+
+# MCC (Matthews Correlation Coefficient) Calculation
+TP <- conf_matrix[2, 2]
+TN <- conf_matrix[1, 1]
+FP <- conf_matrix[1, 2]
+FN <- conf_matrix[2, 1]
+mcc <- (TP * TN - FP * FN) / sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
+print(paste("MCC: ", mcc))
+
+# ROC AUC Calculation
+for_preds2 <- predict(pfas.forest2, pfas.test, type = "prob")  # Get probabilities for ROC
+roc_curve_for2 <- roc(pfas.test$class, as.numeric(for_preds2[, 2]))  # Use probabilities for the positive class
+auc_value_for2 <- auc(roc_curve_for2)
+print(paste("ROC AUC: ", auc_value_for2))
+```
+
+# SVM
+```{r}
+library(e1071)
+
+# Separate features and labels for training and testing
+X_train <- pfas.train[, -which(names(pfas.train) == "class")]  # All columns except 'class'
+y_train <- pfas.train$class  # Assuming 'class' is the target variable
+X_test <- pfas.test[, -which(names(pfas.test) == "class")]
+y_test <- pfas.test$class
+
+# Train the SVM model with RBF kernel
+svm_model <- svm(
+  as.factor(y_train) ~ ., 
+  data = cbind(X_train, y_train), 
+  kernel = "radial",  # RBF kernel
+  cost = 100,         # C = 100 (Regularization parameter)
+  probability = TRUE, # To get probability estimates
+  random_state = 42,
+  sigma = 0.01
+)
+
+# Make predictions on the test set
+pred_binary <- predict(svm_model, pfas.test[, -which(names(pfas.test) == "class")])
+pred_svm <- attr(predict(svm_model, pfas.test[, -which(names(pfas.test) == "class")], probability = TRUE), "probabilities")[, 2] # Probability of positive class
+
+# Confusion matrix for calculating F1 and MCC
+conf_matrix <- confusionMatrix(factor(pred_binary), factor(y_test))
+print(conf_matrix)
+
+# MCC (Matthews Correlation Coefficient) Calculation
+TP <- conf_matrix$table[2, 2]
+TN <- conf_matrix$table[1, 1]
+FP <- conf_matrix$table[1, 2]
+FN <- conf_matrix$table[2, 1]
+mcc <- (TP * TN - FP * FN) / sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
+print(paste("MCC: ", mcc))
+
+# F1-score Calculation
+precision <- conf_matrix$byClass["Pos Pred Value"]
+recall <- conf_matrix$byClass["Sensitivity"]
+f1_score <- 2 * (precision * recall) / (precision + recall)
+print(paste("F1-score: ", f1_score))
+
+# ROC AUC Calculation
+roc_curve_svm <- roc(pfas.test$class, pred_svm)  # Use predicted probabilities for ROC curve
+auc_value_svm <- auc(roc_curve_svm)
+print(paste("ROC AUC: ", auc_value_svm))
+```
+
+# Light GBM
+```{r}
+library(lightgbm)
+
+# Prepare the data
+X_train <- pfas.train[, -which(names(pfas.train) == "class")]  # Features
+y_train <- pfas.train$class 
+
+X_test <- pfas.test[, -which(names(pfas.test) == "class")]
+y_test <- pfas.test$class
+
+# Convert data to LightGBM dataset format
+train_data <- lgb.Dataset(data = as.matrix(X_train), label = y_train)
+test_data <- lgb.Dataset(data = as.matrix(X_test), label = y_test)
+
+# Set parameters for LightGBM
+params <- list(
+  objective = "binary",          # For binary classification
+  metric = "auc",                # Use AUC for evaluation
+  boosting_type = "gbdt",        # Gradient Boosting Decision Tree
+  num_leaves = 31,               # Number of leaves in one tree
+  learning_rate = 0.01,          # Learning rate
+  feature_fraction = 0.8,         # Randomly select a subset of features
+  bagging_fraction = 0.8,
+  max_depth = 15,
+  min_data_in_leaf = 20
+)
+
+
+valid = list(test = test_data)
+#model training
+lt_gbm_model = lightgbm(params = params, train_data, valid, nrounds = 1000)
+
+# Make predictions on the test set
+lt_gbm_pred <- predict(lt_gbm_model, as.matrix(pfas.test[, -which(names(pfas.test) == "class")]))
+
+# Convert probabilities to binary predictions (threshold = 0.5)
+y_pred_binary <- ifelse(lt_gbm_pred > 0.5, 1, 0)  # For binary classification
+
+# Confusion matrix
+conf_matrix <- confusionMatrix(factor(y_pred_binary), factor(y_test))
+print(conf_matrix)
+
+# Calculate F1-score
+precision <- conf_matrix$byClass["Pos Pred Value"]
+recall <- conf_matrix$byClass["Sensitivity"]
+f1_score <- 2 * (precision * recall) / (precision + recall)
+print(paste("F1-score: ", f1_score))
+
+# Calculate ROC AUC
+roc_curve_ltgbm <- roc(pfas.test$class, lt_gbm_pred)  # Using predicted probabilities for ROC curve
+auc_value_ltgbm <- auc(roc_curve_ltgbm)
+print(paste("ROC AUC: ", auc_value_ltgbm))
+```
+
+```{r}
+# Extract confusion matrix values
+TP <- conf_matrix$table[2, 2]  # True Positives
+TN <- conf_matrix$table[1, 1]  # True Negatives
+FP <- conf_matrix$table[1, 2]  # False Positives
+FN <- conf_matrix$table[2, 1]  # False Negatives
+
+# Calculate Matthews Correlation Coefficient (MCC)
+mcc <- (TP * TN - FP * FN) / sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
+
+# Print MCC value
+print(paste("MCC: ", mcc))
+```
+
+
+# BART Model
+```{r}
+pfas.train[] <- lapply(pfas.train, function(x) if (is.character(x)) as.factor(x) else x)
+pfas.test[]  <- lapply(pfas.test,  function(x) if (is.character(x)) as.factor(x) else x)
+
+library(BART)
+set.seed(34)
+pfas.bart <- pbart(as.data.frame(pfas.train[,-ncol(pfas.train)]), pfas.train$class, as.data.frame(pfas.test[,-ncol(pfas.test)]))
+bartImp <- colMeans(pfas.bart$varcount)
+head(sort(bartImp, decreasing = T), 10)
+```
+
+# GAM Model
+```{r}
+library(gam)
+library(mgcv)
+library(splines)
+par(mfrow=c(2,2))
+gam.pfas <- gam(class ~ s(Volume) + s(Estimateddensity) + s(Negativevariance) + s(Overallaveragevalue), family = binomial, data = pfas.train)
+plot(gam.pfas, se = TRUE, col = "blue")
+```
+
+# Stacked models
+```{r}
+# XGBoost
+xg_preds2 <- predict(xg.pfas2, dtest)
+
+# Random Forest
+rf_preds <- predict(pfas.forest2, pfas.test, type = "response")
+
+# SVM
+svm_preds <- attr(predict(svm_model, pfas.test[, -which(names(pfas.test) == "class")], probability = TRUE), "probabilities")[, 2]
+
+# Stack the predictions 
+stacked_data <- data.frame(xgboost = xg_preds2, random_forest = rf_preds, svm = svm_preds)
+
+# Train the meta-model using the stacked predictions
+meta_model <- glm(y_test ~ ., data = stacked_data, family = binomial)
+
+# Make predictions with the stacked model
+stacked_preds <- predict(meta_model, newdata = stacked_data, type = "response")
+
+roc_curve <- roc(y_test, stacked_preds)
+auc(roc_curve)
+```
+
+```{r}
+stacked_binary_preds <- ifelse(stacked_preds > 0.5, 1, 0)
+conf_matrix <- table(Predicted = stacked_binary_preds, Actual = y_test)
+
+# F1 score calculation
+precision <- conf_matrix[2, 2] / sum(conf_matrix[2, ])
+recall <- conf_matrix[2, 2] / sum(conf_matrix[, 2])
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+
+# MCC calculation
+mcc <- (conf_matrix[1, 1] * conf_matrix[2, 2] - conf_matrix[1, 2] * conf_matrix[2, 1]) / 
+      sqrt((conf_matrix[1, 1] + conf_matrix[1, 2]) * (conf_matrix[1, 1] + conf_matrix[2, 1]) * 
+           (conf_matrix[2, 2] + conf_matrix[1, 2]) * (conf_matrix[2, 2] + conf_matrix[2, 1]))
+cat("MCC:", mcc, "\n")
+```
+
+
+# Hierarchical clustering with feature importance
+```{r}
+library(ggplot2)
+library(cluster)
+
+importance_df <- data.frame(Feature = rownames(importance(pfas.forest)),
+                            Importance = importance(pfas.forest)[, "MeanDecreaseGini"])
+
+# Sort by importance
+importance_df <- importance_df %>% arrange(desc(Importance))
+print(importance_df)
+```
+```{r}
+top_features <- importance_df$Feature[1:5]
+X_top <- balanced_data %>% select(all_of(top_features))
+
+distance_matrix <- dist(X_top)
+
+# Hierarchical clustering using the distance matrix
+hclust_model <- hclust(distance_matrix, method = "ward.D2")
+```
+
+```{r}
+# Cut the tree into clusters
+k <- 5
+clusters <- cutree(hclust_model, k)
+
+# Attach clusters back to the original data
+balanced_data$cluster <- as.factor(clusters)
+```
+
+```{r}
+# Visualize Clusters vs Important Descriptors
+
+# Positive Surface Area vs Clusters
+ggplot(balanced_data, aes(x = cluster, y = Positivesurfacearea, fill = cluster)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Positive Surface Area across Clusters", y = "Positive Surface Area", x = "Cluster")
+
+# Summarize cluster means
+cluster_summary <- balanced_data %>%
+  group_by(cluster) %>%
+  summarise(across(all_of(top_features), mean, na.rm = TRUE))
+
+print(cluster_summary)
+```
+
+```{r}
+library(dplyr)
+
+cluster_summary <- balanced_data %>%
+  group_by(cluster) %>%
+  summarise(
+    total = n(),
+    active = sum(class == 1),
+    active_rate = mean(class == 1)
+  ) %>%
+  arrange(desc(active_rate))
+
+print(cluster_summary)
+```
+
+```{r}
+ggplot(cluster_summary, aes(x = cluster, y = active_rate, fill = cluster)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Bioactivity Rate per Cluster",
+       x = "Cluster",
+       y = "Proportion of Active (class = 1)") +
+  theme_minimal()
+```
+
+```{r}
+library(dplyr)
+
+descriptor_summary <- balanced_data %>%
+  group_by(cluster) %>%
+  summarise(
+    ActiveRate = mean(class == 1),
+    Estimateddensity = mean(Estimateddensity, na.rm = TRUE),
+    Positivesurfacearea = mean(Positivesurfacearea, na.rm = TRUE),
+    Volume = mean(Volume, na.rm = TRUE)
+  )
+
+print(descriptor_summary)
+```
+
+```{r}
+ggplot(balanced_data, aes(x = cluster, y = Estimateddensity, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Estimateddensity by Cluster", y = "Estimateddensity") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(balanced_data, aes(x = cluster, y = Positivesurfacearea, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Positivesurfacearea by Cluster", y = "Positivesurfacearea") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(balanced_data, aes(x = cluster, y = Volume, fill = cluster)) +
+  geom_boxplot() +
+  labs(title = "Volume by Cluster", y = "Volume") +
+  theme_minimal()
+```
+
+# ROC-AUC
+```{r}
+library(pROC)
+test_features <- as.matrix(sapply(pfas.test[, -ncol(pfas.test)], as.numeric))
+
+#roc for logistic regression w/ poly
+lg_preds <- predict(lg_model3, pfas.test, type = "response")
+roc_curve_lg <- roc(pfas.test$class, lg_preds) 
+auc_value_lg <- auc(roc_curve_lg)
+
+#roc for xgboost
+xg_preds2 <- predict(xg.pfas2, dtest)
+roc_curve_boost2 <- roc(pfas.test$class, xg_preds2)
+auc_value_boost2 <- auc(roc_curve_boost2)
+
+#roc for random forest
+for_preds2 <- predict(pfas.forest2, pfas.test, type = "prob") 
+roc_curve_for2 <- roc(pfas.test$class, as.numeric(for_preds2[, 2]))  
+auc_value_for2 <- auc(roc_curve_for2)
+
+#roc for SVM
+pred_svm <- attr(predict(svm_model, pfas.test[, -which(names(pfas.test) == "class")], probability = TRUE), "probabilities")[, 2]
+roc_curve_svm <- roc(pfas.test$class, pred_svm)  
+auc_value_svm <- auc(roc_curve_svm)
+
+#roc for lightGBM
+lt_gbm_pred <- predict(lt_gbm_model, as.matrix(pfas.test[, -which(names(pfas.test) == "class")]))
+roc_curve_ltgbm <- roc(pfas.test$class, lt_gbm_pred)
+auc_value_ltgbm <- auc(roc_curve_ltgbm)
+
+#roc for bart model
+roc_curve_bart <- roc(pfas.test$class, pfas.bart$prob.test.mean)
+auc_value_bart <- auc(roc_curve_bart)
+
+#roc for GAM Model
+gam_preds <- predict(gam.pfas, newdata = pfas.test, type = "response")
+roc_curve_gam <- roc(pfas.test$class, gam_preds)
+auc_value_gam <- auc(roc_curve_gam)
+
+#roc for stack model
+stacked_preds <- predict(meta_model, newdata = stacked_data, type = "response")
+roc_curve_stacked <- roc(y_test, stacked_preds)
+auc_value_stacked <- auc(roc_curve_stacked)
+
+# The following lines created the plots for the ROC curves
+plot(roc_curve_boost2, col = "blue", main = "ROC Curves for Different Models", 
+     xlab = "False Positive Rate", ylab = "True Positive Rate", lwd = 2)
+plot(roc_curve_for2, col= "green", add=TRUE, lwd=2)
+plot(roc_curve_lg, col = "orange", add = TRUE, lwd = 2)
+plot(roc_curve_svm, col = "pink", add = TRUE, lwd = 2)
+plot(roc_curve_bart, col = "purple", add = TRUE, lwd = 2)
+plot(roc_curve_gam, col = "red", add = TRUE, lwd = 2)
+plot(roc_curve_ltgbm, col = "yellow", add = TRUE, lwd = 2)
+plot(roc_curve_stacked, col = "black", add = TRUE, lwd = 2)
+
+legend("bottomright", legend = c(paste("XGBoost:", round(auc_value_boost2, 4)),
+                                 paste("Random Forest:", round(auc_value_for2, 4)),
+                                 paste("Logistic Regression:", round(auc_value_lg, 4)),
+                                 paste("SVM:", round(auc_value_svm, 4)),
+                                 paste("BART:", round(auc_value_bart, 4)),
+                                 paste("GAM Model:", round(auc_value_gam, 4)),
+                                 paste("Light GBM Model:", round(auc_value_ltgbm, 4)),
+                                 paste("Stacked Model:", round(auc_value_stacked, 4))),
+       col = c("blue", "green", "orange", "pink", "purple", "red","yellow","black"), lwd = 2)
+```
+
